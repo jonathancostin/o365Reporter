@@ -106,115 +106,50 @@ function Get-LastSentMessageDate
   return $LastSentTime
 }
 
-# Function to get MFA status
+# Function to get MFA status for a user
 function Get-MfaStatus
 {
   param (
     [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User
   )
-
   try
   {
-    # Retrieve all authentication methods for the user
-    $authMethods = Get-MgUserAuthenticationMethod -UserId $User.Id
-
-    # Retrieve specific authentication methods
+    # Retrieve the Microsoft Authenticator methods for the user
     $authenticatorMethods = Get-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $User.Id
-    $oauthMethods         = Get-MgUserAuthenticationSoftwareOathMethod -UserId $User.Id
-    $phoneMethods         = Get-MgUserAuthenticationPhoneMethod -UserId $User.Id
-    $fido2Methods         = Get-MgUserAuthenticationFido2Method -UserId $User.Id
-    $helloMethods         = Get-MgUserAuthenticationWindowsHelloForBusinessMethod -UserId $User.Id
-
-    # Get the phone number used for MFA registration
-    $mfaPhoneNumbers = $phoneMethods | Where-Object {
-      $_.PhoneType -in @('mobile', 'alternateMobile')
-    } | Select-Object -ExpandProperty PhoneNumber
-
-
-    # List all MFA methods
-    $mfaMethods = $authMethods | Where-Object {
-      $_.ODataType -notlike "*PasswordAuthenticationMethod"
-    } 
-
-    # Determine default MFA method
-    $defaultMethod = $authMethods | Where-Object { $_.IsDefault } | Select-Object -First 1
-    $defaultMfaMethod = if ($defaultMethod)
-    { $defaultMethod.ODataType 
-    } else
-    { "Not Set" 
-    }
-
-    # Collect the MFA types
-    $mfaTypes = @()
-
-    if ($authenticatorMethods)
-    {
-      $mfaTypes += "Microsoft Authenticator App"
-    }
-
-    if ($oauthMethods)
-    {
-      $mfaTypes += "Software OATH Token"
-    }
-
-    if ($phoneMethods)
-    {
-      foreach ($phoneMethod in $phoneMethods)
-      {
-        switch ($phoneMethod.PhoneType)
-        {
-          "mobile"
-          { $mfaTypes += "SMS" 
-          }
-          "alternateMobile"
-          { $mfaTypes += "Alternate SMS" 
-          }
-          "office"
-          { $mfaTypes += "Office Phone" 
-          }
-          default
-          { $mfaTypes += "Phone" 
-          }
-        }
-      }
-    }
-
-    if ($fido2Methods)
-    {
-      $mfaTypes += "FIDO2 Security Key"
-    }
-
-    if ($helloMethods)
-    {
-      $mfaTypes += "Windows Hello for Business"
-    }
-
-    # Remove duplicates from mfaTypes
-    $mfaTypes = $mfaTypes | Select-Object -Unique
-
-  } catch
-  {
-    Write-Host "Failed to retrieve MFA methods for user: $($User.UserPrincipalName)"
-    $mfaEnforced      = "Error"
-    $mfaTypes         = @("Unknown")
-    $defaultMfaMethod = "Unknown"
-    $mfaPhoneNumbers  = @("Unknown")
-    $mfaMethods       = @("Unknown")
-  }
-
-  return @{
-    UserPrincipalName = $User.UserPrincipalName
-    HasMfa            = if ($mfaTypes.Count -gt 0)
+    # Retrieve the Software OATH methods for the user
+    $oauthMethods = Get-MgUserAuthenticationSoftwareOathMethod -UserId $User.Id
+    # Check if the user has the Microsoft Authenticator app or Software OATH tokens registered
+    $hasMfa = if ($authenticatorMethods -or $oauthMethods)
     { "Yes" 
     } else
     { "No" 
     }
-    MFAType           = $mfaTypes -join ", "
-    DefaultMFAType    = $defaultMfaMethod
-    MfaPhoneNumbers   = $mfaPhoneNumbers -join ", "
-    MfaMethods        = $mfaMethods -join ", "
+    # Determine MFA Type
+    if ($authenticatorMethods -and $oauthMethods)
+    {
+      $mfaType = "App/Token"
+    } elseif ($oauthMethods)
+    {
+      $mfaType = "Token"
+    } elseif ($authenticatorMethods)
+    {
+      $mfaType = "App"
+    } else
+    {
+      $mfaType = "SMS/None"
+    }
+  } catch
+  {
+    Write-Host "Failed to retrieve MFA methods for user: $($User.UserPrincipalName)"
+    $hasMfa = "Error"
+    $mfaType = "Unknown"
+  }
+  return @{
+    HasMfa  = $hasMfa
+    MFAType = $mfaType
   }
 }
+
 
 # Function to get enrolled devices
 function Get-UserEnrolledDevices
@@ -308,9 +243,6 @@ foreach ($User in $Users)
       Licenses          = $Licenses
       HasMfa            = $HasMfa
       MFAType           = $MFAType
-      DefaultMFAType    = $DefaultMFAType
-      MfaPhoneNumbers   = $MfaPhoneNumbers
-      MfaMethods        = $MfaMethods
       Devices           = $Devices
     }
 
@@ -350,4 +282,4 @@ $InactiveResults | Export-Csv -Path $InactiveReportPath -NoTypeInformation
 $ActiveReportPath = Join-Path -Path $reportlocation -ChildPath "ActiveUsers.csv"
 $ActiveResults | Export-Csv -Path $ActiveReportPath -NoTypeInformation
 
-Write-Host "Reports generated: InactiveUsers.csv and ActiveUsers.csv"
+Write-Host "Reports generated: InactiveUsers.csv and ActiveUsers.csv. They are in your results folder of your current working directory."
