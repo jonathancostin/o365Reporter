@@ -1,9 +1,5 @@
-# TODO
-# Add mfa reports into desktop folder
-#
-#
-# Connections
-Connect-MgGraph -Scopes "User.Read.All, DeviceManagementManagedDevices.Read.All, Directory.Read.All, User.ReadBasic.All, UserAuthenticationMethod.Read.All, AuditLog.Read.All" -NoWelcome
+# Connect to services
+Connect-MgGraph -Scopes "User.Read.All", "DeviceManagementManagedDevices.Read.All", "Directory.Read.All", "User.ReadBasic.All", "UserAuthenticationMethod.Read.All", "AuditLog.Read.All", "Policy.Read.All" -NoWelcome
 Connect-ExchangeOnline
 
 # Get Dates for use in main loop
@@ -18,6 +14,31 @@ $SkuMap = @{}
 foreach ($Sku in $SubscribedSkus)
 {
   $SkuMap[$Sku.SkuId] = $Sku.SkuPartNumber
+}
+
+# Function to get assigned licenses
+function Get-AssignedLicenses
+{
+  param (
+    [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User,
+    [hashtable]$SkuMap
+  )
+
+  $LicenseNames = @()
+
+  foreach ($License in $User.AssignedLicenses)
+  {
+    $SkuId = $License.SkuId
+    if ($SkuMap.ContainsKey($SkuId))
+    {
+      $LicenseNames += $SkuMap[$SkuId]
+    } else
+    {
+      $LicenseNames += $SkuId
+    }
+  }
+
+  return $LicenseNames -join ", "
 }
 
 # Function to get the last sign-in date
@@ -46,21 +67,17 @@ function Get-LastSentMessageDate
   param (
     [string]$MailId
   )
-    
-  # Initialize $LastSentTime
+
   $LastSentTime = $null
 
-  # Check if the user has a mailbox
   $HasMailbox = Get-Recipient -Identity $MailId -ErrorAction SilentlyContinue
 
   if ($null -ne $HasMailbox)
   {
     try
     {
-      # Use Get-MailboxFolderStatistics to get the Sent Items folder statistics
       $MailboxStats = Get-MailboxFolderStatistics -Identity $MailId -FolderScope SentItems -IncludeOldestAndNewestItems -ResultSize 5 -ErrorAction Stop
 
-      # Get the 'Sent Items' folder
       $SentItemsFolder = $MailboxStats | Where-Object { $_.FolderType -eq 'SentItems' }
 
       if ($null -ne $SentItemsFolder)
@@ -89,40 +106,7 @@ function Get-LastSentMessageDate
   return $LastSentTime
 }
 
-# Function to get assigned licenses
-function Get-AssignedLicenses
-{
-  param (
-    [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User,
-    [Hashtable]$SkuMap
-  )
-
-  # Define AssignedLicenses
-  $AssignedLicenses = $User.AssignedLicenses
-
-  if ($AssignedLicenses -and $AssignedLicenses.Count -gt 0)
-  {
-    # Extract the SKU IDs from the assigned licenses
-    $skuIds = $AssignedLicenses | Select-Object -ExpandProperty SkuId
-
-    # Map SKU IDs to SKU Part Numbers using the hashtable
-    $skuPartNumbers = $skuIds | ForEach-Object {
-      $skuId = $_
-      $skuPartNumber = $SkuMap[$skuId]
-      if ($null -eq $skuPartNumber)
-      {
-        $skuPartNumber = $skuId  # Use the SKU ID if Part Number not found
-      }
-      $skuPartNumber
-    }
-    return ($skuPartNumbers -join "; ")
-  } else
-  {
-    return "No Licenses Assigned"
-  }
-}
-
-# Function to get MFA status for a user
+# Function to get MFA status
 function Get-MfaStatus
 {
   param (
@@ -131,66 +115,122 @@ function Get-MfaStatus
 
   try
   {
-    # Retrieve the Microsoft Authenticator methods for the user
+    # Retrieve all authentication methods for the user
+    $authMethods = Get-MgUserAuthenticationMethod -UserId $User.Id
+
+    # Retrieve specific authentication methods
     $authenticatorMethods = Get-MgUserAuthenticationMicrosoftAuthenticatorMethod -UserId $User.Id
+    $oauthMethods         = Get-MgUserAuthenticationSoftwareOathMethod -UserId $User.Id
+    $phoneMethods         = Get-MgUserAuthenticationPhoneMethod -UserId $User.Id
+    $fido2Methods         = Get-MgUserAuthenticationFido2Method -UserId $User.Id
+    $helloMethods         = Get-MgUserAuthenticationWindowsHelloForBusinessMethod -UserId $User.Id
 
-    # Retrieve the Software OATH methods for the user
-    $oauthMethods = Get-MgUserAuthenticationSoftwareOathMethod -UserId $User.Id
+    # Get the phone number used for MFA registration
+    $mfaPhoneNumbers = $phoneMethods | Where-Object {
+      $_.PhoneType -in @('mobile', 'alternateMobile')
+    } | Select-Object -ExpandProperty PhoneNumber
 
-    # Check if the user has the Microsoft Authenticator app or Software OATH tokens registered
-    $hasMfa = if ($authenticatorMethods -or $oauthMethods)
-    { "Yes" 
+
+    # List all MFA methods
+    $mfaMethods = $authMethods | Where-Object {
+      $_.ODataType -notlike "*PasswordAuthenticationMethod"
+    } 
+
+    # Determine default MFA method
+    $defaultMethod = $authMethods | Where-Object { $_.IsDefault } | Select-Object -First 1
+    $defaultMfaMethod = if ($defaultMethod)
+    { $defaultMethod.ODataType 
     } else
-    { "No" 
+    { "Not Set" 
     }
 
-    # Determine MFA Type
-    if ($authenticatorMethods -and $oauthMethods)
+    # Collect the MFA types
+    $mfaTypes = @()
+
+    if ($authenticatorMethods)
     {
-      $mfaType = "App/Token"
-    } elseif ($oauthMethods)
-    {
-      $mfaType = "Token"
-    } elseif ($authenticatorMethods)
-    {
-      $mfaType = "App"
-    } else
-    {
-      $mfaType = "SMS/None"
+      $mfaTypes += "Microsoft Authenticator App"
     }
+
+    if ($oauthMethods)
+    {
+      $mfaTypes += "Software OATH Token"
+    }
+
+    if ($phoneMethods)
+    {
+      foreach ($phoneMethod in $phoneMethods)
+      {
+        switch ($phoneMethod.PhoneType)
+        {
+          "mobile"
+          { $mfaTypes += "SMS" 
+          }
+          "alternateMobile"
+          { $mfaTypes += "Alternate SMS" 
+          }
+          "office"
+          { $mfaTypes += "Office Phone" 
+          }
+          default
+          { $mfaTypes += "Phone" 
+          }
+        }
+      }
+    }
+
+    if ($fido2Methods)
+    {
+      $mfaTypes += "FIDO2 Security Key"
+    }
+
+    if ($helloMethods)
+    {
+      $mfaTypes += "Windows Hello for Business"
+    }
+
+    # Remove duplicates from mfaTypes
+    $mfaTypes = $mfaTypes | Select-Object -Unique
 
   } catch
   {
     Write-Host "Failed to retrieve MFA methods for user: $($User.UserPrincipalName)"
-    $hasMfa = "Error"
-    $mfaType = "Unknown"
+    $mfaEnforced      = "Error"
+    $mfaTypes         = @("Unknown")
+    $defaultMfaMethod = "Unknown"
+    $mfaPhoneNumbers  = @("Unknown")
+    $mfaMethods       = @("Unknown")
   }
 
   return @{
-    HasMfa  = $hasMfa
-    MFAType = $mfaType
+    UserPrincipalName = $User.UserPrincipalName
+    HasMfa            = if ($mfaTypes.Count -gt 0)
+    { "Yes" 
+    } else
+    { "No" 
+    }
+    MFAType           = $mfaTypes -join ", "
+    DefaultMFAType    = $defaultMfaMethod
+    MfaPhoneNumbers   = $mfaPhoneNumbers -join ", "
+    MfaMethods        = $mfaMethods -join ", "
   }
 }
 
-
-# Function to get Enrolled Devices
+# Function to get enrolled devices
 function Get-UserEnrolledDevices
 {
   param(
     [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User
   )
 
-  # Initialize an array to hold the user's device names
   $DeviceNames = @()
 
   try
   {
-    # Get all managed devices where the user is the primary user
     $Devices = Get-MgDeviceManagementManagedDevice -Filter "userPrincipalName eq '$($User.UserPrincipalName)'"
 
     foreach ($Device in $Devices)
     {
-      # Add the device name to the array
       $DeviceNames += $Device.DeviceName
     }
 
@@ -199,7 +239,6 @@ function Get-UserEnrolledDevices
     Write-Warning "Failed to retrieve devices for user $($User.UserPrincipalName): $_"
   }
 
-  # Join the device names into a single string
   $DeviceList = $DeviceNames -join "; "
 
   return $DeviceList
@@ -216,7 +255,12 @@ $Users = Get-MgUser -All -Select "id,displayName,userPrincipalName,signInActivit
 foreach ($User in $Users)
 {
   Write-Host "Processing user: $($User.DisplayName) ($($User.UserPrincipalName))"
-    
+  
+  if ($User.UserPrincipalName -like "*#EXT#*")
+  {
+    Write-Host "Skipping external user: $($User.DisplayName) ($($User.UserPrincipalName))"
+    continue
+  } 
   # Get the assigned licenses for the user
   $Licenses = Get-AssignedLicenses -User $User -SkuMap $SkuMap
 
@@ -230,11 +274,14 @@ foreach ($User in $Users)
   $MfaStatus = Get-MfaStatus -User $User
   $HasMfa = $MfaStatus.HasMfa
   $MFAType = $MfaStatus.MFAType
-  
+  $DefaultMFAType = $MfaStatus.DefaultMFAType
+  $MfaPhoneNumbers = $MfaStatus.MfaPhoneNumbers
+  $MfaMethods = $MfaStatus.MfaMethods
+
   # Get Devices
   $Devices = Get-UserEnrolledDevices -User $User
 
-  if ($LastSignInDate -eq "Never" -or $LastSignInDate -lt $OneMonthAgo)
+  if ($LastSignInDate -eq "Never" -or ($LastSignInDate -is [datetime] -and $LastSignInDate -lt $OneMonthAgo))
   {
     # Get Last Sent Message Date
     $LastSentTime = Get-LastSentMessageDate -MailId $MailId
@@ -254,13 +301,16 @@ foreach ($User in $Users)
     $InactiveResults += $UserInfo
   } else
   {
-    # Create a custom object with user info for active users (exclude LastSignInDate and LastSentMessage)
+    # Create a custom object with user info for active users
     $UserInfo = [PSCustomObject]@{
       DisplayName       = $User.DisplayName
       UserPrincipalName = $MailId
       Licenses          = $Licenses
       HasMfa            = $HasMfa
       MFAType           = $MFAType
+      DefaultMFAType    = $DefaultMFAType
+      MfaPhoneNumbers   = $MfaPhoneNumbers
+      MfaMethods        = $MfaMethods
       Devices           = $Devices
     }
 
@@ -268,7 +318,8 @@ foreach ($User in $Users)
     $ActiveResults += $UserInfo
   }
 }
-# Sort inactive results by sign in date
+
+# Sort inactive results by sign-in date
 $InactiveResults = $InactiveResults | Sort-Object -Property {
   if ($_.LastSignInDate -eq "Never")
   {
@@ -284,14 +335,19 @@ $InactiveResults = $InactiveResults | Sort-Object -Property {
 
 # Results path creation
 $currentlocation = Get-Location
-$resultdir = "\Results"
-$reportlocation = [string]::Concat($currentlocation, $resultdir)
-mkdir $reportlocation
+$reportlocation = Join-Path -Path $currentlocation -ChildPath "Results"
+
+if (-not (Test-Path -Path $reportlocation))
+{
+  New-Item -Path $reportlocation -ItemType Directory | Out-Null
+}
 
 # Export the inactive users to a CSV file
-$InactiveResults | Export-Csv -Path "$reportlocation\InactiveUsers.csv" -NoTypeInformation
+$InactiveReportPath = Join-Path -Path $reportlocation -ChildPath "InactiveUsers.csv"
+$InactiveResults | Export-Csv -Path $InactiveReportPath -NoTypeInformation
 
 # Export the active users to a separate CSV file
-$ActiveResults | Export-Csv -Path "$reportlocation\ActiveUsers.csv" -NoTypeInformation
+$ActiveReportPath = Join-Path -Path $reportlocation -ChildPath "ActiveUsers.csv"
+$ActiveResults | Export-Csv -Path $ActiveReportPath -NoTypeInformation
 
 Write-Host "Reports generated: InactiveUsers.csv and ActiveUsers.csv"
