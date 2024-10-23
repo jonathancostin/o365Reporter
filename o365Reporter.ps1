@@ -6,40 +6,69 @@ Connect-ExchangeOnline
 $CurrentDate = Get-Date
 $OneMonthAgo = $CurrentDate.AddMonths(-1)
 
-# Get all subscribed SKUs once
-$SubscribedSkus = Get-MgSubscribedSku
-
-# Build a hashtable of SkuId to SkuPartNumber
-$SkuMap = @{}
-foreach ($Sku in $SubscribedSkus)
-{
-  $SkuMap[$Sku.SkuId] = $Sku.SkuPartNumber
-}
-
 # Function to get assigned licenses
-function Get-AssignedLicenses
+function Get-UserLicenseInfo
 {
   param (
-    [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User,
-    [hashtable]$SkuMap
+    [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User
   )
-
-  $LicenseNames = @()
-
-  foreach ($License in $User.AssignedLicenses)
+  # Making sure variables are grabbed only once here 
+  if (-not $script:SubscribedSkus)
   {
-    $SkuId = $License.SkuId
-    if ($SkuMap.ContainsKey($SkuId))
+    Write-Host "Retrieving Subscribed SKU"
+    $script:SubscribedSkus = Get-MgSubscribedSku
+
+    # Build the SkuMap
+    $script:SkuMap = @{}
+    foreach ($Sku in $script:SubscribedSkus)
     {
-      $LicenseNames += $SkuMap[$SkuId]
-    } else
-    {
-      $LicenseNames += $SkuId
+      $script:SkuMap[$Sku.SkuId] = $Sku.SkuPartNumber
     }
   }
+  
+  # Custom sku map
+  $customSKUMap = @{
+    "SBP" = "Business Premium"
+    "FLOW_FREE" = "Power Automate Free"
+    "O365_BUSINESS_PREMIUM" = "Business Premium"
+    "O365_BUSINESS_ESSENTIALS" = "Business Essentials"
+    "ENTERPRISEPACK" = "Office E3"
+    "AAD_PREMIUM_P2" = "Azure AD Premium P2"
+  }
+  # Get assigned licenses for the user
+  $AssignedLicenses = $User.AssignedLicenses
 
-  return $LicenseNames -join ", "
+  # Extract the SKU IDs from the assigned licenses
+  $skuIds = $AssignedLicenses | Select-Object -ExpandProperty SkuId
+
+  # Map SKU IDs to SKU Part Numbers 
+  $friendlyLicenseName = $skuIds | ForEach-Object {
+    $skuId = $_
+    $skuPartNumber = $script:SkuMap[$skuId]
+    if ($null -eq $skuPartNumber)
+    {
+      $skuPartNumber = $skuId  # Use the SKU ID if Part Number not found
+    }
+    $friendlyLicenseName = $customSKUMap[$skuPartNumber]
+    if ($null -ne $friendlylicenseName)
+    {
+      $skuPartNumber = $friendlyLicenseName
+    }
+    $friendlyLicenseName
+  }
+
+  # Format License table
+  $License = ($friendlyLicenseName -join "; ")
+
+  if ($null -eq $License -or $License -eq "")
+  {
+    $License = "No License"
+  } else
+  {
+    return $License
+  }
 }
+
 
 # Function to get the last sign-in date
 function Get-LastSignInDate
@@ -197,7 +226,7 @@ foreach ($User in $Users)
     continue
   } 
   # Get the assigned licenses for the user
-  $Licenses = Get-AssignedLicenses -User $User -SkuMap $SkuMap
+  $Licenses = Get-UserLicenseInfo -User $User -SkuMap $SkuMap
 
   # Get Last Sign-In Date
   $LastSignInDate = Get-LastSignInDate -User $User
@@ -209,9 +238,6 @@ foreach ($User in $Users)
   $MfaStatus = Get-MfaStatus -User $User
   $HasMfa = $MfaStatus.HasMfa
   $MFAType = $MfaStatus.MFAType
-  $DefaultMFAType = $MfaStatus.DefaultMFAType
-  $MfaPhoneNumbers = $MfaStatus.MfaPhoneNumbers
-  $MfaMethods = $MfaStatus.MfaMethods
 
   # Get Devices
   $Devices = Get-UserEnrolledDevices -User $User
