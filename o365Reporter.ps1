@@ -208,6 +208,111 @@ function Get-UserEnrolledDevices
   return $DeviceList
 }
 
+
+# Function to convert bytes to a readable size/
+function Convert-BytesToReadableSize
+{
+  param (
+    [int64]$Bytes
+  )
+
+  switch ($Bytes)
+  {
+    {$_ -ge 1PB}
+    { "{0:N2} PB" -f ($Bytes / 1PB); break 
+    }
+    {$_ -ge 1TB}
+    { "{0:N2} TB" -f ($Bytes / 1TB); break 
+    }
+    {$_ -ge 1GB}
+    { "{0:N2} GB" -f ($Bytes / 1GB); break 
+    }
+    {$_ -ge 1MB}
+    { "{0:N2} MB" -f ($Bytes / 1MB); break 
+    }
+    {$_ -ge 1KB}
+    { "{0:N2} KB" -f ($Bytes / 1KB); break 
+    }
+    default
+    { "{0:N2} Bytes" -f $Bytes 
+    }
+  }
+}
+
+function Get-MailboxSize
+{
+  param (
+    [Microsoft.Graph.PowerShell.Models.IMicrosoftGraphUser]$User
+  )
+  # Get primary mailbox statistics
+  $PrimaryStats = Get-MailboxStatistics -Identity $User.UserPrincipalName
+  $sizeInMB = [math]::Round($PrimaryStats.TotalItemSize.Value.ToMB(), 2)
+  return $sizeInMB
+
+  # Extract total size of the primary mailbox
+  $PrimaryMailboxSizeString = $PrimaryStats.TotalItemSize.Value.ToString()
+
+  # Extract bytes from PrimaryMailboxSizeString, handling commas
+  if ($PrimaryMailboxSizeString -match '\(([\d,]+) bytes\)')
+  {
+    $BytesString = $Matches[1]
+    $BytesStringClean = $BytesString -replace ',', ''
+    $PrimaryMailboxBytes = [int64]$BytesStringClean
+  } else
+  {
+    $PrimaryMailboxBytes = 0
+  }
+
+  # Initialize archive variables
+  $ArchiveEnabled = $false
+  $ArchiveMailboxSizeString = "N/A"
+  $ArchiveMailboxBytes = 0
+
+  # Check if archive is enabled
+  if ($Mailbox.ArchiveStatus -eq "Active")
+  {
+    $ArchiveEnabled = $true
+
+    # Get archive mailbox statistics
+    $ArchiveStats = Get-MailboxStatistics -Identity $Mailbox.Identity -Archive
+
+    # Extract total size of the archive mailbox
+    $ArchiveMailboxSizeString = $ArchiveStats.TotalItemSize.Value.ToString()
+
+    # Extract bytes from ArchiveMailboxSizeString, handling commas
+    if ($ArchiveMailboxSizeString -match '\(([\d,]+) bytes\)')
+    {
+      $BytesString = $Matches[1]
+      $BytesStringClean = $BytesString -replace ',', ''
+      $ArchiveMailboxBytes = [int64]$BytesStringClean
+    } else
+    {
+      $ArchiveMailboxBytes = 0
+    }
+  }
+}
+# Calculate Total Mailbox Bytes
+$TotalMailboxBytes = $PrimaryMailboxBytes + $ArchiveMailboxBytes
+
+# Convert bytes to readable sizes
+$PrimaryMailboxSizeReadable = Convert-BytesToReadableSize -Bytes $PrimaryMailboxBytes
+$ArchiveMailboxSizeReadable = if ($ArchiveEnabled)
+{ Convert-BytesToReadableSize -Bytes $ArchiveMailboxBytes 
+} else
+{ "N/A" 
+}
+$TotalMailboxSizeReadable   = Convert-BytesToReadableSize -Bytes $TotalMailboxBytes
+
+# Add data to the report
+return [PSCustomObject]@{
+  PrimaryMailboxSizeReadable = $PrimaryMailboxSizeReadable
+  ArchiveEnabled             = $ArchiveEnabled
+  ArchiveMailboxSizeReadable = $ArchiveMailboxSizeReadable
+  TotalMailboxSizeReadable   = $TotalMailboxSizeReadable
+}
+
+
+
 # Initialize arrays to hold the results
 $InactiveResults = @()
 $ActiveResults = @()
@@ -270,6 +375,12 @@ foreach ($User in $Users)
       HasMfa            = $HasMfa
       MFAType           = $MFAType
       Devices           = $Devices
+      PrimaryMailboxSizeReadable = $PrimaryMailboxSizeReadable
+      ArchiveEnabled             = $ArchiveEnabled
+      ArchiveMailboxSizeReadable = $ArchiveMailboxSizeReadable
+      TotalMailboxSizeReadable   = $TotalMailboxSizeReadable
+
+
     }
 
     # Add to active results
@@ -285,6 +396,7 @@ $InactiveResults = $InactiveResults | Sort-Object -Property {
   } elseif ($_.LastSignInDate -is [datetime])
   {
     $_.LastSignInDate
+    Get-MailboxSize -User $user
   } else
   {
     [datetime]::MinValue
