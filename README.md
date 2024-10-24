@@ -49,7 +49,7 @@ The script performs the following actions:
 1. **Install Required Modules**:
 
    ```powershell
-   Install-Module Microsoft.Graph -Force
+   Install-Module mggraph -Force
    Install-Module ExchangeOnlineManagement -Force
    ```
 
