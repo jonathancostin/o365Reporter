@@ -209,9 +209,7 @@ foreach ($User in $Users)
   $MfaStatus = Get-MfaStatus -User $User
   $HasMfa = $MfaStatus.HasMfa
   $MFAType = $MfaStatus.MFAType
-  $DefaultMFAType = $MfaStatus.DefaultMFAType
-  $MfaPhoneNumbers = $MfaStatus.MfaPhoneNumbers
-  $MfaMethods = $MfaStatus.MfaMethods
+
 
   # Get Devices
   $Devices = Get-UserEnrolledDevices -User $User
